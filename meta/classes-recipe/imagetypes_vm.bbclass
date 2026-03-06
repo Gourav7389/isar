@@ -18,26 +18,28 @@ SOURCE_IMAGE_FILE ?= "${IMAGE_FULLNAME}.wic"
 # VMware needs this to be "streamOptimized".
 VMDK_SUBFORMAT ?= "monolithicSparse"
 
-VIRTUAL_MACHINE_IMAGE_TYPE ?= "vmdk"
-VIRTUAL_MACHINE_IMAGE_FILE = "${IMAGE_FULLNAME}-disk001.${VIRTUAL_MACHINE_IMAGE_TYPE}"
-VIRTUAL_MACHINE_DISK = "${PP_DEPLOY}/${VIRTUAL_MACHINE_IMAGE_FILE}"
-
-def set_convert_options(d):
-   format = d.getVar("VIRTUAL_MACHINE_IMAGE_TYPE")
-   if format == "vmdk":
-      return "-o subformat=%s" % d.getVar("VMDK_SUBFORMAT")
-   else:
-      return ""
-
-
-CONVERSION_OPTIONS = "${@set_convert_options(d)}"
+VIRTUAL_MACHINE_DISK_FORMATS ?= "vmdk"
 
 convert_wic() {
-    rm -f '${DEPLOY_DIR_IMAGE}/${VIRTUAL_MACHINE_IMAGE_FILE}'
-    bbnote "Creating ${VIRTUAL_MACHINE_IMAGE_FILE} from ${SOURCE_IMAGE_FILE}"
-    imager_run -p -d ${PP_WORK} -- \
-    /usr/bin/qemu-img convert -f raw -O ${VIRTUAL_MACHINE_IMAGE_TYPE} ${CONVERSION_OPTIONS} \
-        '${PP_DEPLOY}/${SOURCE_IMAGE_FILE}' '${VIRTUAL_MACHINE_DISK}'
+
+    for disk_format in ${VIRTUAL_MACHINE_DISK_FORMATS}; do
+
+        VIRTUAL_MACHINE_DISK_FILE="${IMAGE_FULLNAME}-disk001.${disk_format}"
+        VIRTUAL_MACHINE_DISK_PATH="${PP_DEPLOY}/${VIRTUAL_MACHINE_DISK_FILE}"
+        rm -f "${DEPLOY_DIR_IMAGE}/${VIRTUAL_MACHINE_DISK_FILE}"
+        bbnote "Creating ${VIRTUAL_MACHINE_DISK_FILE} from ${SOURCE_IMAGE_FILE}"
+
+        if [ "${disk_format}" = "vmdk" ]; then
+            OPTIONS="-o subformat=${VMDK_SUBFORMAT}"
+        else
+            OPTIONS=""
+        fi
+
+        imager_run -p -d ${PP_WORK} -- \
+            /usr/bin/qemu-img convert -f raw -O ${disk_format} ${OPTIONS} \
+            "${PP_DEPLOY}/${SOURCE_IMAGE_FILE}" "${VIRTUAL_MACHINE_DISK_PATH}"
+
+    done
 }
 
 # User settings for OVA
@@ -49,6 +51,7 @@ OVA_FIRMWARE ?= "efi"
 OVA_ACPI ?= "true"
 OVA_3D_ACCEL ?= "false"
 OVA_SHA_ALG = "1"
+OVA_VM_DISK = "${OVA_NAME}-disk001.vmdk"
 
 # Generate random MAC addresses just as VirtualBox does, the format is
 # their assigned prefix for the first 3 bytes followed by 3 random bytes.
@@ -60,16 +63,15 @@ macgen() {
 
 OVA_VARS = "OVA_NAME OVA_MEMORY OVA_NUMBER_OF_CPU OVA_VRAM \
             OVA_FIRMWARE OVA_ACPI OVA_3D_ACCEL \
-            OVA_SHA_ALG VIRTUAL_MACHINE_IMAGE_FILE VMDK_SUBFORMAT"
+            OVA_SHA_ALG OVA_VM_DISK VMDK_SUBFORMAT"
 
 IMAGE_TEMPLATE_FILES:ova = "${OVF_TEMPLATE_FILE}"
 IMAGE_TEMPLATE_VARS:ova = "${OVA_VARS}"
 
 do_image_ova[prefuncs] += "convert_wic"
 IMAGE_CMD:ova() {
-    if [ ! ${VIRTUAL_MACHINE_IMAGE_TYPE} = "vmdk" ]; then
-        exit 0
-    fi
+    ${@bb.utils.contains('VIRTUAL_MACHINE_DISK_FORMATS', 'vmdk', '', 'exit 0', d)}
+
     rm -f '${DEPLOY_DIR_IMAGE}/${IMAGE_FULLNAME}.ova'
     rm -f '${DEPLOY_DIR_IMAGE}/${IMAGE_FULLNAME}.ovf'
     rm -f '${DEPLOY_DIR_IMAGE}/${IMAGE_FULLNAME}.mf'
@@ -80,7 +82,7 @@ IMAGE_CMD:ova() {
     export OVF_TEMPLATE_STAGE2=$(echo ${OVF_TEMPLATE_FILE} | sed 's/.tmpl$//' )
     imager_run -p -d ${PP_WORK} <<'EOIMAGER'
         set -e
-        export DISK_SIZE_BYTES=$(qemu-img info -f vmdk "${VIRTUAL_MACHINE_DISK}" \
+        export DISK_SIZE_BYTES=$(qemu-img info -f vmdk "${PP_DEPLOY}/${OVA_VM_DISK}" \
                                  | gawk 'match($0, /^virtual size:.*\(([0-9]+) bytes\)/, a) {print a[1]}')
         export DISK_UUID=$(uuidgen)
         export VM_UUID=$(uuidgen)
@@ -90,11 +92,11 @@ IMAGE_CMD:ova() {
 
         # VirtualBox needs here a manifest file. VMware does accept that format.
         if [ "${VMDK_SUBFORMAT}" = "monolithicSparse" ]; then
-            echo "SHA${OVA_SHA_ALG}(${VIRTUAL_MACHINE_IMAGE_FILE})=$(sha${OVA_SHA_ALG}sum ${PP_DEPLOY}/${VIRTUAL_MACHINE_IMAGE_FILE} | cut -d' ' -f1)" >> ${PP_DEPLOY}/${IMAGE_FULLNAME}.mf
+            echo "SHA${OVA_SHA_ALG}(${OVA_VM_DISK})=$(sha${OVA_SHA_ALG}sum ${PP_DEPLOY}/${OVA_VM_DISK} | cut -d' ' -f1)" >> ${PP_DEPLOY}/${IMAGE_FULLNAME}.mf
             echo "SHA${OVA_SHA_ALG}(${IMAGE_FULLNAME}.ovf)=$(sha${OVA_SHA_ALG}sum ${PP_DEPLOY}/${IMAGE_FULLNAME}.ovf | cut -d' ' -f1)" >> ${PP_DEPLOY}/${IMAGE_FULLNAME}.mf
             tar -uvf ${PP_DEPLOY}/${IMAGE_FULLNAME}.ova -C ${PP_DEPLOY} ${IMAGE_FULLNAME}.mf
         fi
-        tar -uvf ${PP_DEPLOY}/${IMAGE_FULLNAME}.ova -C ${PP_DEPLOY} ${VIRTUAL_MACHINE_IMAGE_FILE}
+        tar -uvf ${PP_DEPLOY}/${IMAGE_FULLNAME}.ova -C ${PP_DEPLOY} ${OVA_VM_DISK}
 EOIMAGER
 }
 IMAGE_CMD:ova[depends] = "${PN}:do_transform_template"
